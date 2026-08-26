@@ -1,10 +1,12 @@
 #include <blaze/Blaze.h>
 #include <cstdio>
 #include <random>
+#include <omp.h>
 using namespace blaze;
 
 
 int main(void) {
+    omp_set_num_threads(4); // limits the thread usage to 4, data may get cold -> RAM gets hot!
     size_t N = 10;
     DynamicVector<double, columnVector> a(N), b(N), c(N);
     std::random_device dev;
