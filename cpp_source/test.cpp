@@ -1,4 +1,4 @@
-#include <blaze/Blaze.h>
+#include <blaze/Blaze.h> // last used OS - Linux/Debian
 #include <iostream>
 
 int main(void) {
