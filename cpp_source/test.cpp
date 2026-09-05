@@ -8,16 +8,15 @@ int main(void) {
 
 /* Apple Compiler:
 /opt/homebrew/opt/llvm/bin/clang++ \
-  -std=c++20 \
-  -O3 \
-  -march=native \
-  -I/opt/homebrew/include \
-  -I/opt/homebrew/opt/libomp/include \
-  -L/opt/homebrew/opt/libomp/lib \
-  -fopenmp \
-  test.cpp \
-  -o executable \
-  -framework Accelerate
+-std=c++20 -w  \
+-O3 \
+-march=native \
+-I/opt/homebrew/include \
+-I/opt/homebrew/opt/libomp/include \
+-L/opt/homebrew/opt/libomp/lib \
+-fopenmp \
+-framework Accelerate \
+matrix_addn.cpp -o executable
 */
 
 // ----------------------------// 
