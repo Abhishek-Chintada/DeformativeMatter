@@ -37,7 +37,7 @@ int main(void) {
     blaze::DynamicVector<double> c {0.0, 0.0, 0.0};
     res = a + b;
     print_Vector(res);
-    c = Mat * a;
+    c = Mat * a;     // Matrix Vector Product
     print_Vector(c);
     return 0;
 }
