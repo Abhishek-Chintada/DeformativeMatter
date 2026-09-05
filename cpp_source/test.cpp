@@ -23,4 +23,5 @@ int main(void) {
 // ----------------------------// 
 
 /*Linux(Debian) Compiler:
-clang++ -std=c++20 -O3 -march=native -fopenmp -lblas test.cpp -o executable*/
+clang++ -std=c++20 -O3 -march=native -fopenmp -lblas test.cpp -o executable
+ */
