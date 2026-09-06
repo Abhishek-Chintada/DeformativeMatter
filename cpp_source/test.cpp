@@ -2,6 +2,7 @@
 #include <iostream>
 
 int main(void) {
+    blaze::setNumThreads(8); // required to activate the open threading.
     std::cout << "Notlo Modda" << std::endl;
     return 0;
 }
