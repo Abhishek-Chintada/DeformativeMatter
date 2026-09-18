@@ -3,5 +3,14 @@
 #include <blaze/Blaze.h>
 #include <iostream>
 
-// printing templates not required, use std::cout -> Already overloaded.
-// Taking user input -> loops are the best bet.
+
+template<typename VectorType>
+void print_Vector(const VectorType& x, size_t N) {
+    std::cout << "[ ";
+    for(size_t i {}; i < N; i++) {
+        std::cout << x[i] << "  ";
+    }
+    std::cout << "]" << std::endl;
+}
+
+
