@@ -1,0 +1,59 @@
+# ==========================
+# Build directories
+# ==========================
+build/
+cmake-build-*/
+*.cmake
+
+# ==========================
+# Compiled binaries
+# ==========================
+*.o
+*.exe
+*.out
+*.app
+fem_main
+fem_test
+
+# ==========================
+# IDE / Editor files
+# ==========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ==========================
+# Eigen (downloaded by CMake)
+# ==========================
+_deps/
+extern/eigen/
+
+# ==========================
+# OS-specific
+# ==========================
+# macOS
+.DS_Store
+*.dSYM/
+# Linux
+*.swp
+
+# ==========================
+# Logs & temp files
+# ==========================
+*.log
+*.tmp
+*.bak
+
+# ==========================
+# Don't ignore source files
+# ==========================
+!cpp_source_eigen/
+!cpp_source_blaze/
+!*.cpp
+!*.hpp
+!*.h
+!CMakeLists.txt
