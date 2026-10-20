@@ -1,15 +1,25 @@
-#include <iostream>
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <array>
+#include <cmath>
+#include <vector>
+#include <cstdio>
 
-int main() {
-    Eigen::Matrix3d K;
-    K << 1, 2, 3,
-         4, 5, 6,
-         7, 8, 9;
-    
-    Eigen::Vector3d F{10, 20, 30};
-    Eigen::Vector3d u = K.colPivHouseholderQr().solve(F);
-    
-    std::cout << "Displacements:\n" << u << std::endl;
+using Eigen::Matrix3d;
+using Eigen::Matrix;
+using Eigen::Vector2d;
+using Eigen::VectorXd;
+
+typedef Eigen::Triplet<double> T;
+
+struct Mesh {
+    std::vector<Vector2d> nodes;
+    std::vector<std::array<int, 3>> tris;
+};
+
+
+
+int main(void) {
+
     return 0;
 }
