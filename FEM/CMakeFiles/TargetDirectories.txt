@@ -1,0 +1,3 @@
+/home/abhishekchintada/slanderishCode/DeformativeMatter/FEM/CMakeFiles/fem_sheet.dir
+/home/abhishekchintada/slanderishCode/DeformativeMatter/FEM/CMakeFiles/edit_cache.dir
+/home/abhishekchintada/slanderishCode/DeformativeMatter/FEM/CMakeFiles/rebuild_cache.dir

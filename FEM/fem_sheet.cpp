@@ -1,3 +1,5 @@
+// SOP
+
 // fem_sheet.cpp
 // Interactive 2D finite element sheet: bilinear quadrilateral (Q4) elements, plane stress / plane strain,
 // optional hole, selectable thickness, movable load, nodal stress smoothing and an OpenGL contour map.
@@ -679,4 +681,4 @@ int main(int argc, char** argv) {
     glfwDestroyWindow(win);
     glfwTerminate();
     return 0;
-}
+} // EOP

@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/abhishekchintada/slanderishCode/DeformativeMatter/FEM",
+  "command": "/usr/bin/c++  -isystem /usr/include/eigen3 -O3 -DNDEBUG -std=gnu++17 -o CMakeFiles/fem_sheet.dir/fem_sheet.cpp.o -c /home/abhishekchintada/slanderishCode/DeformativeMatter/FEM/fem_sheet.cpp",
+  "file": "/home/abhishekchintada/slanderishCode/DeformativeMatter/FEM/fem_sheet.cpp",
+  "output": "CMakeFiles/fem_sheet.dir/fem_sheet.cpp.o"
+}
+]
