@@ -1,8 +1,10 @@
-// SOP
-
-// fem_sheet.cpp
+// fem_sheet.cpp  --  "FEM Stress Lab"
 // Interactive 2D finite element sheet: bilinear quadrilateral (Q4) elements, plane stress / plane strain,
 // optional hole, selectable thickness, movable load, nodal stress smoothing and an OpenGL contour map.
+//
+// Visual layer: dark theme, built-in 5x7 pixel font (no font library needed), title banner, dimension
+// lines, support hatching, load arrow, pulsing peak-stress marker, yield line on the colour bar,
+// and info / safety-check / controls cards.
 //
 // Libraries: Eigen (linear algebra), GLFW (window + input), OpenGL 1.x fixed-function (drawing).
 // Units: mm, N, MPa (N/mm^2). Keep them consistent.
@@ -21,8 +23,11 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef GL_CLAMP_TO_EDGE
@@ -45,8 +50,14 @@ typedef Matrix<double, 8, 8> Mat88;
 enum Field { VON_MISES, SIGMA_XX, SIGMA_YY, TAU_XY, PRINC_MAX, PRINC_MIN, NFIELDS };
 static const char* FIELD_NAMES[NFIELDS] = {"von Mises", "sigma_xx", "sigma_yy", "tau_xy",
                                            "max principal", "min principal"};
+static const char* FIELD_SHORT[NFIELDS] = {"VON MISES", "SIGMA XX", "SIGMA YY", "TAU XY",
+                                           "MAX PRINCIPAL", "MIN PRINCIPAL"};
+static const char* FIELD_TITLES[NFIELDS] = {"VON MISES EQUIVALENT STRESS", "NORMAL STRESS  SIGMA-XX",
+                                            "NORMAL STRESS  SIGMA-YY", "SHEAR STRESS  TAU-XY",
+                                            "MAXIMUM PRINCIPAL STRESS", "MINIMUM PRINCIPAL STRESS"};
 static const char* BC_NAMES[3] = {"left edge fixed", "left+right edges fixed", "bottom edge fixed"};
 static const int MESH_LEVELS[4][2] = {{20, 10}, {40, 20}, {80, 40}, {120, 60}};
+static const int CLIP_PCT[4] = {100, 50, 25, 10};
 
 struct Params {
     double W = 200.0, H = 100.0;     // sheet width and height [mm]
@@ -54,6 +65,7 @@ struct Params {
     int nx = 40, ny = 20;            // cells along x and y
     double thickness = 5.0;          // [mm]
     double E = 200e3, nu = 0.3;      // steel [MPa]
+    double yield = 250.0;            // yield strength used for the safety check [MPa] (mild steel)
     bool planeStress = true;
     bool hole = true;
     double holeR = 20.0;             // [mm], hole is centred in the sheet
@@ -76,11 +88,13 @@ struct Params {
 struct Mesh {
     std::vector<Vector2d> X;                  // node coordinates (only nodes used by some element)
     std::vector<std::array<int, 4>> quads;    // 4 node ids per element, counter-clockwise
+    std::vector<std::array<int, 2>> bedges;   // boundary edges (outer edge + hole edge), for outlines
 };
 
 void buildMesh(const Params& p, Mesh& m) {
     m.X.clear();
     m.quads.clear();
+    m.bedges.clear();
     const double dx = p.W / p.nx, dy = p.H / p.ny;
     auto g = [&](int i, int j) { return j * (p.nx + 1) + i; };
     std::vector<int> newId((p.nx + 1) * (p.ny + 1), -1);
@@ -103,6 +117,15 @@ void buildMesh(const Params& p, Mesh& m) {
         }
         m.quads.push_back(q);
     }
+    // An edge that belongs to exactly one element lies on the boundary.
+    std::map<std::pair<int, int>, int> count;
+    for (auto& q : m.quads)
+        for (int k = 0; k < 4; ++k) {
+            int a = q[k], b = q[(k + 1) % 4];
+            count[{std::min(a, b), std::max(a, b)}]++;
+        }
+    for (auto& kv : count)
+        if (kv.second == 1) m.bedges.push_back({kv.first.first, kv.first.second});
 }
 
 // ============================================================================================
@@ -159,6 +182,8 @@ struct Fem {
     std::vector<double> sxx, syy, txy;          // smoothed nodal stress components
     std::vector<double> field;                  // chosen scalar for colouring
     double fmin = 0, fmax = 1, umax = 0;
+    double vmMax = 0;                           // peak von Mises over all nodes (for the safety check)
+    int peakNode = 0;                           // node with the largest |field| value
     int loadedNodes = 0;
 };
 
@@ -284,13 +309,18 @@ void recoverStress(const Params& p, Fem& F) {
 void updateField(const Params& p, Fem& F) {
     const int N = (int)F.mesh.X.size();
     F.field.assign(N, 0);
+    F.vmMax = 0;
+    F.peakNode = 0;
+    double bestAbs = -1;
     for (int n = 0; n < N; ++n) {
         double sx = F.sxx[n], sy = F.syy[n], t = F.txy[n];
         double sz = p.planeStress ? 0.0 : p.nu * (sx + sy);
         double R = std::sqrt(0.25 * (sx - sy) * (sx - sy) + t * t);
+        double vm = std::sqrt(0.5 * ((sx - sy) * (sx - sy) + (sy - sz) * (sy - sz) + (sz - sx) * (sz - sx)) + 3 * t * t);
+        F.vmMax = std::max(F.vmMax, vm);
         double v = 0;
         switch (p.field) {
-            case VON_MISES: v = std::sqrt(0.5 * ((sx - sy) * (sx - sy) + (sy - sz) * (sy - sz) + (sz - sx) * (sz - sx)) + 3 * t * t); break;
+            case VON_MISES: v = vm; break;
             case SIGMA_XX: v = sx; break;
             case SIGMA_YY: v = sy; break;
             case TAU_XY: v = t; break;
@@ -298,6 +328,7 @@ void updateField(const Params& p, Fem& F) {
             case PRINC_MIN: v = 0.5 * (sx + sy) - R; break;
         }
         F.field[n] = v;
+        if (std::fabs(v) > bestAbs) { bestAbs = std::fabs(v); F.peakNode = n; }
     }
     F.fmin = *std::min_element(F.field.begin(), F.field.end());
     F.fmax = *std::max_element(F.field.begin(), F.field.end());
@@ -327,7 +358,7 @@ int selftest() {
 }
 
 // ============================================================================================
-// 6. Rendering helpers
+// 6. Rendering helpers: colour map, pixel font, rectangles, cards
 // ============================================================================================
 static void colormap(double t, float& r, float& g, float& b) {  // classic "jet"
     auto cl = [](double v) { return (float)std::max(0.0, std::min(1.0, v)); };
@@ -356,33 +387,116 @@ static void makeTexture(bool banded) {
     glTexImage1D(GL_TEXTURE_1D, 0, GL_RGB, NT, 0, GL_RGB, GL_UNSIGNED_BYTE, img);
 }
 
-// Tiny 7-segment text renderer so the colour bar can show numbers without any font library.
-static void drawText(const char* s, double x, double y, double h) {
-    static const int MASK[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};  // bits: a b c d e f g
-    double w = 0.55 * h;
-    glBegin(GL_LINES);
-    for (const char* c = s; *c; ++c) {
-        int mask = -1;
-        if (*c >= '0' && *c <= '9') mask = MASK[*c - '0'];
-        else if (*c == '-') mask = 0x40;
-        if (mask >= 0) {
-            double X[7][4] = {{0, h, w, h}, {w, h, w, h / 2}, {w, h / 2, w, 0}, {0, 0, w, 0},
-                              {0, h / 2, 0, 0}, {0, h, 0, h / 2}, {0, h / 2, w, h / 2}};
-            for (int sgm = 0; sgm < 7; ++sgm)
-                if (mask & (1 << sgm)) {
-                    glVertex2d(x + X[sgm][0], y + X[sgm][1]);
-                    glVertex2d(x + X[sgm][2], y + X[sgm][3]);
-                }
-        }
-        if (*c == '.') {
-            glVertex2d(x + 0.1 * h, y);
-            glVertex2d(x + 0.1 * h, y + 0.08 * h);
-            x += 0.3 * h;
+struct Col { float r, g, b, a; };
+static const Col C_WHITE = {1.0f, 1.0f, 1.0f, 1.0f};
+static const Col C_DIM = {0.62f, 0.69f, 0.80f, 1.0f};
+static const Col C_ACCENT = {0.30f, 0.85f, 1.00f, 1.0f};
+static const Col C_WARM = {1.00f, 0.62f, 0.25f, 1.0f};
+static const Col C_KEY = {1.00f, 0.82f, 0.35f, 1.0f};
+static const Col C_PANEL = {0.08f, 0.11f, 0.17f, 0.92f};
+static const Col C_GREEN = {0.30f, 0.90f, 0.50f, 1.0f};
+static const Col C_AMBER = {1.00f, 0.75f, 0.20f, 1.0f};
+static const Col C_RED = {1.00f, 0.32f, 0.32f, 1.0f};
+
+static void setCol(const Col& c) { glColor4f(c.r, c.g, c.b, c.a); }
+
+static void fillRect(double x, double y, double w, double h, const Col& c) {
+    setCol(c);
+    glBegin(GL_QUADS);
+    glVertex2d(x, y); glVertex2d(x + w, y); glVertex2d(x + w, y + h); glVertex2d(x, y + h);
+    glEnd();
+}
+static void strokeRect(double x, double y, double w, double h, const Col& c, float lw = 1.0f) {
+    setCol(c); glLineWidth(lw);
+    glBegin(GL_LINE_LOOP);
+    glVertex2d(x, y); glVertex2d(x + w, y); glVertex2d(x + w, y + h); glVertex2d(x, y + h);
+    glEnd();
+}
+
+// Classic 5x7 pixel font, ASCII 32..126. Each glyph = 5 columns, bit 0 = top row.
+static const unsigned char FONT[95][5] = {
+    {0x00,0x00,0x00,0x00,0x00},{0x00,0x00,0x5F,0x00,0x00},{0x00,0x07,0x00,0x07,0x00},{0x14,0x7F,0x14,0x7F,0x14},
+    {0x24,0x2A,0x7F,0x2A,0x12},{0x23,0x13,0x08,0x64,0x62},{0x36,0x49,0x55,0x22,0x50},{0x00,0x05,0x03,0x00,0x00},
+    {0x00,0x1C,0x22,0x41,0x00},{0x00,0x41,0x22,0x1C,0x00},{0x08,0x2A,0x1C,0x2A,0x08},{0x08,0x08,0x3E,0x08,0x08},
+    {0x00,0x50,0x30,0x00,0x00},{0x08,0x08,0x08,0x08,0x08},{0x00,0x60,0x60,0x00,0x00},{0x20,0x10,0x08,0x04,0x02},
+    {0x3E,0x51,0x49,0x45,0x3E},{0x00,0x42,0x7F,0x40,0x00},{0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},
+    {0x18,0x14,0x12,0x7F,0x10},{0x27,0x45,0x45,0x45,0x39},{0x3C,0x4A,0x49,0x49,0x30},{0x01,0x71,0x09,0x05,0x03},
+    {0x36,0x49,0x49,0x49,0x36},{0x06,0x49,0x49,0x29,0x1E},{0x00,0x36,0x36,0x00,0x00},{0x00,0x56,0x36,0x00,0x00},
+    {0x00,0x08,0x14,0x22,0x41},{0x14,0x14,0x14,0x14,0x14},{0x41,0x22,0x14,0x08,0x00},{0x02,0x01,0x51,0x09,0x06},
+    {0x32,0x49,0x79,0x41,0x3E},{0x7E,0x11,0x11,0x11,0x7E},{0x7F,0x49,0x49,0x49,0x36},{0x3E,0x41,0x41,0x41,0x22},
+    {0x7F,0x41,0x41,0x22,0x1C},{0x7F,0x49,0x49,0x49,0x41},{0x7F,0x09,0x09,0x01,0x01},{0x3E,0x41,0x41,0x51,0x32},
+    {0x7F,0x08,0x08,0x08,0x7F},{0x00,0x41,0x7F,0x41,0x00},{0x20,0x40,0x41,0x3F,0x01},{0x7F,0x08,0x14,0x22,0x41},
+    {0x7F,0x40,0x40,0x40,0x40},{0x7F,0x02,0x04,0x02,0x7F},{0x7F,0x04,0x08,0x10,0x7F},{0x3E,0x41,0x41,0x41,0x3E},
+    {0x7F,0x09,0x09,0x09,0x06},{0x3E,0x41,0x51,0x21,0x5E},{0x7F,0x09,0x19,0x29,0x46},{0x46,0x49,0x49,0x49,0x31},
+    {0x01,0x01,0x7F,0x01,0x01},{0x3F,0x40,0x40,0x40,0x3F},{0x1F,0x20,0x40,0x20,0x1F},{0x7F,0x20,0x18,0x20,0x7F},
+    {0x63,0x14,0x08,0x14,0x63},{0x03,0x04,0x78,0x04,0x03},{0x61,0x51,0x49,0x45,0x43},{0x00,0x7F,0x41,0x41,0x00},
+    {0x02,0x04,0x08,0x10,0x20},{0x00,0x41,0x41,0x7F,0x00},{0x04,0x02,0x01,0x02,0x04},{0x40,0x40,0x40,0x40,0x40},
+    {0x00,0x01,0x02,0x04,0x00},{0x20,0x54,0x54,0x54,0x78},{0x7F,0x48,0x44,0x44,0x38},{0x38,0x44,0x44,0x44,0x20},
+    {0x38,0x44,0x44,0x48,0x7F},{0x38,0x54,0x54,0x54,0x18},{0x08,0x7E,0x09,0x01,0x02},{0x08,0x14,0x54,0x54,0x3C},
+    {0x7F,0x08,0x04,0x04,0x78},{0x00,0x44,0x7D,0x40,0x00},{0x20,0x40,0x44,0x3D,0x00},{0x00,0x7F,0x10,0x28,0x44},
+    {0x00,0x41,0x7F,0x40,0x00},{0x7C,0x04,0x18,0x04,0x78},{0x7C,0x08,0x04,0x04,0x78},{0x38,0x44,0x44,0x44,0x38},
+    {0x7C,0x14,0x14,0x14,0x08},{0x08,0x14,0x14,0x18,0x7C},{0x7C,0x08,0x04,0x04,0x08},{0x48,0x54,0x54,0x54,0x20},
+    {0x04,0x3F,0x44,0x40,0x20},{0x3C,0x40,0x40,0x20,0x7C},{0x1C,0x20,0x40,0x20,0x1C},{0x3C,0x40,0x30,0x40,0x3C},
+    {0x44,0x28,0x10,0x28,0x44},{0x0C,0x50,0x50,0x50,0x3C},{0x44,0x64,0x54,0x4C,0x44},{0x00,0x08,0x36,0x41,0x00},
+    {0x00,0x00,0x7F,0x00,0x00},{0x00,0x41,0x36,0x08,0x00},{0x02,0x01,0x02,0x04,0x02}};
+
+// Width in pixels of a string drawn at integer scale sc (each font pixel becomes an sc x sc square).
+static double textW(const char* s, int sc) { return (double)std::strlen(s) * 6.0 * sc - sc; }
+
+// Draw text with its bottom-left corner at (x, y). If c2 is given the colour fades from c1 to c2.
+static void text(const char* s, double x, double y, int sc, const Col& c1, const Col* c2 = nullptr) {
+    const int n = (int)std::strlen(s);
+    glBegin(GL_QUADS);
+    for (int i = 0; i < n; ++i) {
+        if (c2) {
+            float t = n > 1 ? (float)i / (n - 1) : 0.f;
+            glColor4f(c1.r + (c2->r - c1.r) * t, c1.g + (c2->g - c1.g) * t, c1.b + (c2->b - c1.b) * t, c1.a);
         } else {
-            x += w + 0.3 * h;
+            setCol(c1);
+        }
+        unsigned char ch = (unsigned char)s[i];
+        if (ch >= 32 && ch < 127) {
+            const unsigned char* gl = FONT[ch - 32];
+            for (int col = 0; col < 5; ++col)
+                for (int row = 0; row < 7; ++row)
+                    if (gl[col] & (1 << row)) {
+                        double px = x + (i * 6 + col) * sc, py = y + (6 - row) * sc;
+                        glVertex2d(px, py); glVertex2d(px + sc, py);
+                        glVertex2d(px + sc, py + sc); glVertex2d(px, py + sc);
+                    }
         }
     }
     glEnd();
+}
+static void textShadow(const char* s, double x, double y, int sc, const Col& c1, const Col* c2 = nullptr) {
+    Col sh = {0, 0, 0, 0.55f};
+    text(s, x + sc, y - sc, sc, sh);
+    text(s, x, y, sc, c1, c2);
+}
+static void textRight(const char* s, double xr, double y, int sc, const Col& c) { text(s, xr - textW(s, sc), y, sc, c); }
+static void textCenter(const char* s, double xc, double y, int sc, const Col& c) { text(s, xc - textW(s, sc) / 2, y, sc, c); }
+
+// Text on a small dark label background.
+static void tag(const char* s, double x, double y, int sc, const Col& fg, const Col& bg) {
+    fillRect(x - 5, y - 4, textW(s, sc) + 10, 7.0 * sc + 8, bg);
+    text(s, x, y, sc, fg);
+}
+
+// A dashboard card: drop shadow, dark panel, accent line, title.
+static void card(double x, double y, double w, double h, const char* title) {
+    fillRect(x + 5, y - 5, w, h, Col{0, 0, 0, 0.35f});
+    fillRect(x, y, w, h, C_PANEL);
+    fillRect(x, y + h - 3, w, 3, Col{C_ACCENT.r, C_ACCENT.g, C_ACCENT.b, 0.85f});
+    strokeRect(x + 0.5, y + 0.5, w - 1, h - 1, Col{1, 1, 1, 0.10f});
+    text(title, x + 16, y + h - 30, 2, C_ACCENT);
+}
+
+// Nice number formatting for tick labels.
+static void fmtVal(double v, char* buf, size_t n) {
+    double a = std::fabs(v);
+    if (a < 1000) std::snprintf(buf, n, "%.1f", v);
+    else if (a < 1e5) std::snprintf(buf, n, "%.0f", v);
+    else std::snprintf(buf, n, "%.2g", v);
 }
 
 // ============================================================================================
@@ -394,17 +508,160 @@ struct App {
     bool dirtyMesh = true, dirtyAssemble = true, dirtySolve = true, dirtyField = true, dirtyTitle = true;
     bool dirtyTexture = true;
     bool dragging = false;
-    int ww = 1100, wh = 720;
+    bool wantShot = false;
+    int ww = 1280, wh = 800;
 } app;
+
+static const double CARD_Y = 20, CARD_H = 190;   // bottom dashboard row
 
 struct View { double s, ox, oy; };
 static View viewFor(int ww, int wh) {
-    const double barW = 150;
+    const double left = 100, right = 170, top = 110, bottom = 225;   // space reserved for UI around the sheet
+    double availW = ww - left - right, availH = wh - top - bottom;
     View v;
-    v.s = std::min((ww - barW - 60) / (app.p.W * 1.1), (wh - 100) / (app.p.H * 1.7));
-    v.ox = (ww - barW) / 2 - v.s * app.p.W / 2;
-    v.oy = wh / 2 - v.s * app.p.H / 2;
+    v.s = std::max(0.5, std::min(availW / app.p.W, availH / (app.p.H * 1.4)));
+    v.ox = left + (availW - v.s * app.p.W) / 2;
+    v.oy = bottom + (availH - v.s * app.p.H) / 2;
     return v;
+}
+
+static double clipTop(const Params& p, const Fem& F) {
+    return F.fmin + (F.fmax - F.fmin) * (CLIP_PCT[p.clipIdx] / 100.0);
+}
+
+static void drawBackground(int ww, int wh) {
+    glBegin(GL_QUADS);
+    glColor3f(0.12f, 0.15f, 0.23f); glVertex2d(0, 0); glVertex2d(ww, 0);
+    glColor3f(0.04f, 0.055f, 0.09f); glVertex2d(ww, wh); glVertex2d(0, wh);
+    glEnd();
+    glColor4f(1, 1, 1, 0.07f); glPointSize(2.0f);   // faint "engineering paper" dot grid
+    glBegin(GL_POINTS);
+    for (int x = 20; x < ww; x += 30)
+        for (int y = 20; y < wh; y += 30) glVertex2d(x, y);
+    glEnd();
+}
+
+static void drawHeader(int ww, int wh, const Params& p) {
+    Col a = {0.35f, 0.85f, 1.0f, 1.0f}, b = {1.0f, 0.60f, 0.25f, 1.0f};
+    textShadow("Finite Element Analysis", 30, wh - 62, 5, a, &b);
+    text("Bilinear Q4 finite element sheet  -  live stress contours", 32, wh - 88, 2, C_DIM);
+    textRight(FIELD_TITLES[p.field], ww - 30, wh - 50, 2, C_WHITE);
+    textRight("press 1-6 to change the field", ww - 30, wh - 72, 1, C_DIM);
+    const int SEG = 96;                              // rainbow strip, a preview of the colour map
+    double x0 = 30, x1 = ww - 30;
+    glBegin(GL_QUADS);
+    for (int i = 0; i < SEG; ++i) {
+        float r, g, bl;
+        double xa = x0 + (x1 - x0) * i / SEG, xb = x0 + (x1 - x0) * (i + 1) / SEG;
+        colormap((i + 0.5) / SEG, r, g, bl);
+        glColor4f(r, g, bl, 0.95f);
+        glVertex2d(xa, wh - 104); glVertex2d(xb, wh - 104); glVertex2d(xb, wh - 100); glVertex2d(xa, wh - 100);
+    }
+    glEnd();
+}
+
+static void drawColorbar(int ww, int wh, const Params& p, const Fem& F, double top) {
+    double bx = ww - 135, bw = 26, by0 = 250, by1 = wh - 160;
+    fillRect(bx + 4, by0 - 4, bw, by1 - by0, Col{0, 0, 0, 0.35f});
+    glEnable(GL_TEXTURE_1D);
+    glBindTexture(GL_TEXTURE_1D, gTex);
+    glColor3f(1, 1, 1);
+    glBegin(GL_QUADS);
+    glTexCoord1f(0.5f / 256); glVertex2d(bx, by0); glVertex2d(bx + bw, by0);
+    glTexCoord1f(255.5f / 256); glVertex2d(bx + bw, by1); glVertex2d(bx, by1);
+    glEnd();
+    glDisable(GL_TEXTURE_1D);
+    strokeRect(bx, by0, bw, by1 - by0, Col{1, 1, 1, 0.6f}, 1.5f);
+
+    for (int i = 0; i <= 5; ++i) {
+        double t = i / 5.0, y = by0 + t * (by1 - by0);
+        setCol(Col{1, 1, 1, 0.7f}); glLineWidth(1.0f);
+        glBegin(GL_LINES); glVertex2d(bx + bw, y); glVertex2d(bx + bw + 6, y); glEnd();
+        char buf[32];
+        fmtVal(F.fmin + t * (top - F.fmin), buf, sizeof buf);
+        text(buf, bx + bw + 10, y - 7, 2, C_WHITE);
+    }
+    text(FIELD_SHORT[p.field], bx, by1 + 38, 1, C_DIM);
+    text("[MPa]", bx, by1 + 16, 2, C_WHITE);
+    if (p.clipIdx > 0) {
+        char buf[48];
+        std::snprintf(buf, sizeof buf, "CLIPPED TO %d%%", CLIP_PCT[p.clipIdx]);
+        text(buf, bx - 24, by0 - 22, 1, C_WARM);
+    }
+    // yield line (only meaningful for von Mises)
+    if (p.field == VON_MISES && p.yield > F.fmin && p.yield < top) {
+        double y = by0 + (p.yield - F.fmin) / (top - F.fmin) * (by1 - by0);
+        setCol(C_WHITE); glLineWidth(3.0f);
+        glBegin(GL_LINES); glVertex2d(bx - 8, y); glVertex2d(bx + bw + 8, y); glEnd();
+        textRight("YIELD", bx - 12, y - 3, 1, C_WHITE);
+    }
+}
+
+static void drawInfoCard(const Params& p, const Fem& F) {
+    double x = 30, w = 430, y = CARD_Y, h = CARD_H;
+    card(x, y, w, h, "MODEL");
+    double ty = y + h - 60;
+    char b[96], c[64];
+    auto row = [&](const char* k, const char* val) {
+        text(k, x + 16, ty, 2, C_DIM);
+        text(val, x + 16 + 7 * 12, ty, 2, C_WHITE);
+        ty -= 18;
+    };
+    std::snprintf(b, sizeof b, "%.0f x %.0f x %.1f mm", p.W, p.H, p.thickness); row("Sheet", b);
+    std::snprintf(b, sizeof b, "E=%.0f GPa  nu=%.2f", p.E / 1000.0, p.nu); row("Steel", b);
+    std::snprintf(b, sizeof b, "%.0f N @ %.0f deg", p.Fmag, p.angleDeg); row("Load", b);
+    if (p.hole) std::snprintf(c, sizeof c, "hole R=%.0f mm", p.holeR); else std::snprintf(c, sizeof c, "no hole");
+    std::snprintf(b, sizeof b, "%s, %s", p.planeStress ? "Plane stress" : "Plane strain", c); row("Mode", b);
+    std::snprintf(b, sizeof b, "%d x %d  (%zu nodes)", p.nx, p.ny, F.mesh.X.size()); row("Mesh", b);
+    row("Fixed", BC_NAMES[p.bcMode]);
+    double defScale = F.umax > 0 ? 0.08 * p.H / F.umax * p.defMult : 0.0;
+    if (F.umax >= 1e-3) std::snprintf(c, sizeof c, "%.4f mm", F.umax); else std::snprintf(c, sizeof c, "%.2e mm", F.umax);
+    std::snprintf(b, sizeof b, "%s  (def x%.0f)", c, defScale); row("Disp", b);
+}
+
+static void drawResultCard(const Params& p, const Fem& F) {
+    double x = 490, w = 300, y = CARD_Y, h = CARD_H, T = y + h;
+    card(x, y, w, h, "SAFETY CHECK");
+    char b[64];
+    text("PEAK VON MISES STRESS", x + 16, T - 50, 1, C_DIM);
+    if (F.vmMax < 1e4) std::snprintf(b, sizeof b, "%.1f", F.vmMax); else std::snprintf(b, sizeof b, "%.3g", F.vmMax);
+    text(b, x + 16, T - 86, 4, C_WHITE);
+    text("MPa", x + 16 + textW(b, 4) + 10, T - 86, 2, C_DIM);
+    std::snprintf(b, sizeof b, "Yield strength %.0f MPa", p.yield);
+    text(b, x + 16, T - 112, 1, C_DIM);
+
+    double sf = F.vmMax > 1e-9 ? p.yield / F.vmMax : 999.0;
+    Col sc = sf >= 1.5 ? C_GREEN : sf >= 1.0 ? C_AMBER : C_RED;
+    const char* verdict = sf >= 1.5 ? "SAFE" : sf >= 1.0 ? "MARGINAL" : "YIELDS";
+    text("SAFETY FACTOR", x + 16, T - 136, 1, C_DIM);
+    if (sf > 99) std::snprintf(b, sizeof b, ">99"); else std::snprintf(b, sizeof b, "%.2f", sf);
+    text(b, x + 16, T - 168, 3, sc);
+    fillRect(x + 140, T - 172, 144, 30, Col{sc.r, sc.g, sc.b, 0.22f});
+    strokeRect(x + 140, T - 172, 144, 30, sc, 1.5f);
+    textCenter(verdict, x + 140 + 72, T - 163, 2, sc);
+}
+
+static void drawControlsCard(int ww) {
+    double x = 810, w = ww - 30 - x, y = CARD_Y, h = CARD_H, T = y + h;
+    card(x, y, w, h, "CONTROLS");
+    static const char* L[][2] = {
+        {"Mouse", "move load point"}, {"Q / E", "rotate load 15 deg"}, {"< / >", "load magnitude"},
+        {"Up/Down", "sheet thickness"}, {", / .", "load patch size"}, {"1 - 6", "stress field"},
+        {"[ / ]", "deformation scale"}, {"- / =", "mesh density"}, {"H", "toggle hole"}};
+    static const char* R[][2] = {
+        {"B", "cycle supports"}, {"S", "stress / strain"}, {"C", "smooth / banded"},
+        {"K", "clip colour range"}, {"M", "mesh lines"}, {"U", "undeformed outline"},
+        {"P", "save shot.ppm"}, {"Esc", "quit"}};
+    for (int i = 0; i < 9; ++i) {
+        double ty = T - 56 - i * 15;
+        text(L[i][0], x + 16, ty, 1, C_KEY);
+        text(L[i][1], x + 16 + 54, ty, 1, C_DIM);
+    }
+    for (int i = 0; i < 8; ++i) {
+        double ty = T - 56 - i * 15;
+        text(R[i][0], x + 16 + 205, ty, 1, C_KEY);
+        text(R[i][1], x + 16 + 205 + 30, ty, 1, C_DIM);
+    }
 }
 
 static void drawScene(GLFWwindow* win) {
@@ -413,7 +670,7 @@ static void drawScene(GLFWwindow* win) {
     glfwGetFramebufferSize(win, &fw, &fh);
     app.ww = ww; app.wh = wh;
     glViewport(0, 0, fw, fh);
-    glClearColor(0.97f, 0.97f, 0.97f, 1);
+    glClearColor(0.05f, 0.065f, 0.10f, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, ww, 0, wh, -1, 1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
@@ -422,9 +679,12 @@ static void drawScene(GLFWwindow* win) {
 
     const Params& p = app.p;
     const Fem& F = app.F;
+    drawBackground(ww, wh);
+    drawHeader(ww, wh, p);
     View v = viewFor(ww, wh);
     const int N = (int)F.mesh.X.size();
     if (N == 0 || (int)F.u.size() != 2 * N || (int)F.field.size() != N) return;
+    const double tt = glfwGetTime();
 
     double autoScale = F.umax > 0 ? 0.08 * p.H / F.umax : 0.0;
     double def = autoScale * p.defMult;
@@ -435,9 +695,37 @@ static void drawScene(GLFWwindow* win) {
         P0[n] = Vector2d(v.ox + v.s * x0.x(), v.oy + v.s * x0.y());
         P[n] = Vector2d(v.ox + v.s * x1.x(), v.oy + v.s * x1.y());
     }
+    const double sx0 = v.ox, sx1 = v.ox + v.s * p.W, sy0 = v.oy, sy1 = v.oy + v.s * p.H;
 
-    // contour map: scalar -> 1D texture coordinate
-    double top = F.fmin + (F.fmax - F.fmin) * (p.clipIdx == 0 ? 1.0 : p.clipIdx == 1 ? 0.5 : p.clipIdx == 2 ? 0.25 : 0.1);
+    // ---- dimension lines (undeformed geometry) ------------------------------------------------
+    {
+        Col dc = {0.60f, 0.72f, 0.90f, 0.85f}, bg = {0.06f, 0.08f, 0.13f, 1.0f};
+        char b[32];
+        double yd = sy1 + 26, xd = sx0 - 54;
+        setCol(dc); glLineWidth(1.0f);
+        glBegin(GL_LINES);
+        glVertex2d(sx0, yd); glVertex2d(sx1, yd);
+        glVertex2d(sx0, yd - 6); glVertex2d(sx0, yd + 6); glVertex2d(sx1, yd - 6); glVertex2d(sx1, yd + 6);
+        glVertex2d(xd, sy0); glVertex2d(xd, sy1);
+        glVertex2d(xd - 6, sy0); glVertex2d(xd + 6, sy0); glVertex2d(xd - 6, sy1); glVertex2d(xd + 6, sy1);
+        glEnd();
+        std::snprintf(b, sizeof b, "%.0f mm", p.W);
+        tag(b, (sx0 + sx1) / 2 - textW(b, 2) / 2, yd - 7, 2, C_DIM, bg);
+        std::snprintf(b, sizeof b, "%.0f mm", p.H);
+        tag(b, xd - textW(b, 2) / 2, (sy0 + sy1) / 2 - 7, 2, C_DIM, bg);
+    }
+
+    // ---- drop shadow under the sheet ---------------------------------------------------------
+    glColor4f(0, 0, 0, 0.38f);
+    glBegin(GL_TRIANGLES);
+    for (auto& q : F.mesh.quads) {
+        int idx[6] = {0, 1, 2, 0, 2, 3};
+        for (int k : idx) glVertex2d(P[q[k]].x() + 7, P[q[k]].y() - 7);
+    }
+    glEnd();
+
+    // ---- contour map: scalar -> 1D texture coordinate ----------------------------------------
+    double top = clipTop(p, F);
     auto tc = [&](int n) {
         double t = (F.field[n] - F.fmin) / (top - F.fmin);
         t = std::max(0.0, std::min(1.0, t));
@@ -454,15 +742,6 @@ static void drawScene(GLFWwindow* win) {
     glEnd();
     glDisable(GL_TEXTURE_1D);
 
-    if (p.showUndeformed) {
-        glColor4f(0, 0, 0, 0.35f); glLineWidth(1.0f);
-        for (auto& q : F.mesh.quads) {
-            // only draw outer boundary edges of the undeformed shape: edge shared by 2 quads would be drawn twice, fine
-            glBegin(GL_LINE_LOOP);
-            for (int k = 0; k < 4; ++k) glVertex2d(P0[q[k]].x(), P0[q[k]].y());
-            glEnd();
-        }
-    }
     if (p.showMesh) {
         glColor4f(0, 0, 0, 0.12f); glLineWidth(1.0f);
         for (auto& q : F.mesh.quads) {
@@ -471,69 +750,120 @@ static void drawScene(GLFWwindow* win) {
             glEnd();
         }
     }
-
-    // fixed nodes
-    glColor3f(0.1f, 0.1f, 0.1f); glPointSize(5.0f);
-    glBegin(GL_POINTS);
-    for (int n = 0; n < N; ++n)
-        if (F.fixedDof[2 * n]) glVertex2d(P0[n].x(), P0[n].y());
-    glEnd();
-
-    // load: patch circle + arrow ending at the load point
-    double cx = v.ox + v.s * p.lx, cy = v.oy + v.s * p.ly;
-    double a = p.angleDeg * M_PI / 180.0, dxn = std::cos(a), dyn = std::sin(a);
-    glColor3f(0.1f, 0.1f, 0.1f); glLineWidth(2.5f);
-    if (!p.loadEdge) {
-        glBegin(GL_LINE_LOOP);
-        for (int i = 0; i < 40; ++i)
-            glVertex2d(cx + v.s * p.loadRadius * std::cos(i * M_PI / 20), cy + v.s * p.loadRadius * std::sin(i * M_PI / 20));
-        glEnd();
-        double len = 70;
-        double sx = cx - dxn * len, sy = cy - dyn * len;
+    if (p.showUndeformed) {   // dashed ghost of the original shape
+        glEnable(GL_LINE_STIPPLE); glLineStipple(3, 0x5555);
+        glColor4f(1, 1, 1, 0.60f); glLineWidth(1.2f);
         glBegin(GL_LINES);
-        glVertex2d(sx, sy); glVertex2d(cx, cy);
+        for (auto& e : F.mesh.bedges) { glVertex2d(P0[e[0]].x(), P0[e[0]].y()); glVertex2d(P0[e[1]].x(), P0[e[1]].y()); }
         glEnd();
-        glBegin(GL_TRIANGLES);  // arrow head
-        glVertex2d(cx, cy);
-        glVertex2d(cx - dxn * 14 + dyn * 6, cy - dyn * 14 - dxn * 6);
-        glVertex2d(cx - dxn * 14 - dyn * 6, cy - dyn * 14 + dxn * 6);
-        glEnd();
+        glDisable(GL_LINE_STIPPLE);
+    }
+    glColor4f(1, 1, 1, 0.95f); glLineWidth(2.2f);   // crisp outline of the deformed sheet
+    glBegin(GL_LINES);
+    for (auto& e : F.mesh.bedges) { glVertex2d(P[e[0]].x(), P[e[0]].y()); glVertex2d(P[e[1]].x(), P[e[1]].y()); }
+    glEnd();
+
+    // ---- supports: engineering-style hatching ------------------------------------------------
+    glColor4f(0.5f, 0.85f, 1.0f, 0.95f); glLineWidth(1.6f);
+    glBegin(GL_LINES);
+    for (int n = 0; n < N; ++n)
+        if (F.fixedDof[2 * n]) {
+            double ox = 0, oy = 0;
+            if (p.bcMode == 2) oy = -1;
+            else if (F.mesh.X[n].x() < p.W / 2) ox = -1;
+            else ox = 1;
+            Vector2d a = P0[n];
+            Vector2d b = a + 10.0 * Vector2d(ox, oy) + (ox != 0 ? Vector2d(0, -10) : Vector2d(-10, 0));
+            glVertex2d(a.x(), a.y()); glVertex2d(b.x(), b.y());
+        }
+    glEnd();
+
+    // ---- hole label --------------------------------------------------------------------------
+    if (p.hole) {
+        Vector2d acc(0, 0); int cnt = 0;
+        double rr = p.holeR + 1.5 * std::max(p.W / p.nx, p.H / p.ny);
+        for (int n = 0; n < N; ++n)
+            if ((F.mesh.X[n] - Vector2d(p.W / 2, p.H / 2)).norm() < rr) { acc += P[n]; ++cnt; }
+        if (cnt) {
+            acc /= (double)cnt;
+            char b[32];
+            std::snprintf(b, sizeof b, "R = %.0f mm", p.holeR);
+            int sc = v.s * p.holeR * 2 > 120 ? 2 : 1;
+            textCenter(b, acc.x(), acc.y() - 3.5 * sc, sc, C_DIM);
+        }
     }
 
-    // colour bar
-    double bx = ww - 110, bw = 24, by0 = 70, by1 = wh - 70;
-    glEnable(GL_TEXTURE_1D);
-    glColor3f(1, 1, 1);
-    glBegin(GL_QUADS);
-    glTexCoord1f(0.5f / 256); glVertex2d(bx, by0); glVertex2d(bx + bw, by0);
-    glTexCoord1f(255.5f / 256); glVertex2d(bx + bw, by1); glVertex2d(bx, by1);
-    glEnd();
-    glDisable(GL_TEXTURE_1D);
-    glColor3f(0, 0, 0); glLineWidth(1.0f);
-    glBegin(GL_LINE_LOOP);
-    glVertex2d(bx, by0); glVertex2d(bx + bw, by0); glVertex2d(bx + bw, by1); glVertex2d(bx, by1);
-    glEnd();
-    for (int i = 0; i <= 5; ++i) {
-        double t = i / 5.0, y = by0 + t * (by1 - by0);
-        glBegin(GL_LINES); glVertex2d(bx + bw, y); glVertex2d(bx + bw + 5, y); glEnd();
-        char buf[32];
-        double val = F.fmin + t * (top - F.fmin);
-        std::snprintf(buf, sizeof buf, std::fabs(val) < 100 ? "%.2f" : "%.0f", val);
-        drawText(buf, bx + bw + 9, y - 5, 10);
+    // ---- load: patch disc, arrow and label ---------------------------------------------------
+    {
+        double cx = v.ox + v.s * p.lx, cy = v.oy + v.s * p.ly;
+        double a = p.angleDeg * M_PI / 180.0, dxn = std::cos(a), dyn = std::sin(a);
+        if (!p.loadEdge) {
+            double pr = v.s * p.loadRadius;
+            glColor4f(C_WARM.r, C_WARM.g, C_WARM.b, 0.18f);
+            glBegin(GL_TRIANGLE_FAN);
+            glVertex2d(cx, cy);
+            for (int i = 0; i <= 40; ++i) glVertex2d(cx + pr * std::cos(i * M_PI / 20), cy + pr * std::sin(i * M_PI / 20));
+            glEnd();
+            glColor4f(C_WARM.r, C_WARM.g, C_WARM.b, 0.65f + 0.35f * (float)std::sin(tt * 3.0)); glLineWidth(2.0f);
+            glBegin(GL_LINE_LOOP);
+            for (int i = 0; i < 40; ++i) glVertex2d(cx + pr * std::cos(i * M_PI / 20), cy + pr * std::sin(i * M_PI / 20));
+            glEnd();
+
+            double len = 80;
+            double tx = cx - dxn * len, ty = cy - dyn * len;
+            glColor4f(0, 0, 0, 0.55f); glLineWidth(6.0f);
+            glBegin(GL_LINES); glVertex2d(tx, ty); glVertex2d(cx - dxn * 10, cy - dyn * 10); glEnd();
+            setCol(C_WARM); glLineWidth(3.0f);
+            glBegin(GL_LINES); glVertex2d(tx, ty); glVertex2d(cx - dxn * 10, cy - dyn * 10); glEnd();
+            glBegin(GL_TRIANGLES);   // arrow head
+            glVertex2d(cx, cy);
+            glVertex2d(cx - dxn * 20 + dyn * 8, cy - dyn * 20 - dxn * 8);
+            glVertex2d(cx - dxn * 20 - dyn * 8, cy - dyn * 20 + dxn * 8);
+            glEnd();
+
+            char b[48];
+            std::snprintf(b, sizeof b, "F = %.0f N", p.Fmag);
+            double w = textW(b, 2);
+            double lxp = tx - dxn * (w / 2 + 10) - w / 2, lyp = ty - dyn * 16 - 7;
+            lxp = std::max(8.0, std::min(ww - w - 8.0, lxp));
+            lyp = std::max(8.0, std::min(wh - 30.0, lyp));
+            tag(b, lxp, lyp, 2, C_WARM, Col{0, 0, 0, 0.6f});
+        }
     }
+
+    // ---- peak stress marker (pulsing ring + label) -------------------------------------------
+    {
+        Vector2d pk = P[F.peakNode];
+        double r = 10 + 3 * std::sin(tt * 4.0);
+        glColor4f(0, 0, 0, 0.7f); glLineWidth(5.0f);
+        glBegin(GL_LINE_LOOP);
+        for (int i = 0; i < 32; ++i) glVertex2d(pk.x() + r * std::cos(i * M_PI / 16), pk.y() + r * std::sin(i * M_PI / 16));
+        glEnd();
+        glColor4f(1, 1, 1, 1); glLineWidth(2.0f);
+        glBegin(GL_LINE_LOOP);
+        for (int i = 0; i < 32; ++i) glVertex2d(pk.x() + r * std::cos(i * M_PI / 16), pk.y() + r * std::sin(i * M_PI / 16));
+        glEnd();
+        char vb[32], b[64];
+        fmtVal(F.field[F.peakNode], vb, sizeof vb);
+        std::snprintf(b, sizeof b, "PEAK %s MPa", vb);
+        double w = textW(b, 2);
+        double lxp = std::max(8.0, std::min(ww - w - 8.0, pk.x() + 20));
+        double lyp = std::max(8.0, std::min(wh - 30.0, pk.y() + 18));
+        tag(b, lxp, lyp, 2, C_WHITE, Col{0, 0, 0, 0.7f});
+    }
+
+    drawColorbar(ww, wh, p, F, top);
+    drawInfoCard(p, F);
+    drawResultCard(p, F);
+    drawControlsCard(ww);
     glLineWidth(1.0f);
 }
 
 static void updateTitle(GLFWwindow* win) {
     const Params& p = app.p;
-    const Fem& F = app.F;
-    double top = F.fmin + (F.fmax - F.fmin) * (p.clipIdx == 0 ? 1.0 : p.clipIdx == 1 ? 0.5 : p.clipIdx == 2 ? 0.25 : 0.1);
-    char buf[512];
-    std::snprintf(buf, sizeof buf,
-        "FEM sheet | %s [MPa] range %.2f..%.2f | t=%.2f mm F=%.0f N ang=%.0f | %s | %s | %s | %dx%d | umax=%.4f mm | def x%.0f",
-        FIELD_NAMES[p.field], F.fmin, top, p.thickness, p.Fmag, p.angleDeg, p.planeStress ? "plane stress" : "plane strain",
-        BC_NAMES[p.bcMode], p.hole ? "hole" : "no hole", p.nx, p.ny, F.umax,
-        F.umax > 0 ? 0.08 * p.H / F.umax * p.defMult : 0.0);
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "FEM Stress Lab  |  %s  |  %s", FIELD_NAMES[p.field],
+                  p.planeStress ? "plane stress" : "plane strain");
     glfwSetWindowTitle(win, buf);
 }
 
@@ -602,7 +932,7 @@ static void onKey(GLFWwindow* w, int key, int, int action, int) {
         case GLFW_KEY_C: p.banded = !p.banded; app.dirtyTexture = true; break;
         case GLFW_KEY_M: p.showMesh = !p.showMesh; break;
         case GLFW_KEY_U: p.showUndeformed = !p.showUndeformed; break;
-        case GLFW_KEY_P: app.dirtyTitle = true; saveShot(w, "shot.ppm"); break;
+        case GLFW_KEY_P: app.wantShot = true; break;   // saved in the main loop, right after drawing
         default: break;
     }
     p.nx = MESH_LEVELS[p.meshLevel][0];
@@ -624,7 +954,7 @@ static void refresh() {
 
 static void printHelp() {
     std::puts(
-        "FEM sheet controls\n"
+        "FEM Stress Lab controls\n"
         "  Left mouse (click/drag)  move the load point\n"
         "  Q / E                    rotate load direction by -15 / +15 degrees\n"
         "  Left / Right arrow       decrease / increase load magnitude\n"
@@ -658,7 +988,7 @@ int main(int argc, char** argv) {
     }
     if (!glfwInit()) { std::puts("GLFW init failed"); return 1; }
     if (shot) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    GLFWwindow* win = glfwCreateWindow(app.ww, app.wh, "FEM sheet", nullptr, nullptr);
+    GLFWwindow* win = glfwCreateWindow(app.ww, app.wh, "FEM Stress Lab", nullptr, nullptr);
     if (!win) { std::puts("could not create window (is an OpenGL driver available?)"); glfwTerminate(); return 1; }
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);
@@ -675,10 +1005,11 @@ int main(int argc, char** argv) {
         if (app.dirtyTitle) { updateTitle(win); app.dirtyTitle = false; }
         drawScene(win);
         if (shot) { saveShot(win, shotPath); break; }
+        if (app.wantShot) { saveShot(win, "shot.ppm"); app.wantShot = false; }
         glfwSwapBuffers(win);
         glfwPollEvents();
     }
     glfwDestroyWindow(win);
     glfwTerminate();
     return 0;
-} // EOP
+}
