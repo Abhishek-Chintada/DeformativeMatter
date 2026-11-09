@@ -1,10 +1,7 @@
+
 // fem_sheet.cpp  --  "FEM Stress Lab"
 // Interactive 2D finite element sheet: bilinear quadrilateral (Q4) elements, plane stress / plane strain,
 // optional hole, selectable thickness, movable load, nodal stress smoothing and an OpenGL contour map.
-//
-// Visual layer: clean engineering-report style. Light page, built-in vector (CAD-style) lettering so no
-// font library is needed, title block, dimension lines, support hatching, load arrow, peak-stress marker,
-// yield line on the colour bar and a three-column data table. Press F1 for the controls.
 //
 // Libraries: Eigen (linear algebra), GLFW (window + input), OpenGL 1.x fixed-function (drawing).
 // Units: mm, N, MPa (N/mm^2). Keep them consistent.
