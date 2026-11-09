@@ -1,14 +1,14 @@
-
-// fem_sheet.cpp  --  "FEM Stress Lab"
-// Interactive 2D finite element sheet: bilinear quadrilateral (Q4) elements, plane stress / plane strain,
-// optional hole, selectable thickness, movable load, nodal stress smoothing and an OpenGL contour map.
+// fem_sheet.cpp -- "FEM Stress Lab"
+// Interactive 2D finite element sheet: Q4 elements, plane stress / plane strain, optional hole,
+// adjustable thickness, movable load, nodal stress smoothing and an OpenGL contour map.
+// Press F1 in the viewer for the controls.
 //
-// Libraries: Eigen (linear algebra), GLFW (window + input), OpenGL 1.x fixed-function (drawing).
+// Libraries: Eigen, GLFW, OpenGL 1.x (fixed function).
 // Units: mm, N, MPa (N/mm^2). Keep them consistent.
 //
 // Run modes:
 //   ./fem_sheet                  interactive viewer
-//   ./fem_sheet --selftest       solve a cantilever and compare with beam theory (no window)
+//   ./fem_sheet --selftest       cantilever check against beam theory (no window)
 //   ./fem_sheet --shot out.ppm   render one frame to a PPM image and exit
 
 #include <GLFW/glfw3.h>
@@ -41,9 +41,9 @@ typedef Matrix<double, 3, 8> Mat38;
 typedef Matrix<double, 4, 2> Mat42;
 typedef Matrix<double, 8, 8> Mat88;
 
-// ============================================================================================
-// 1. Parameters (everything the user can change while the program runs)
-// ============================================================================================
+// ---------------------------------------------------------------------------
+// Parameters
+// ---------------------------------------------------------------------------
 enum Field { VON_MISES, SIGMA_XX, SIGMA_YY, TAU_XY, PRINC_MAX, PRINC_MIN, NFIELDS };
 static const char* FIELD_NAMES[NFIELDS] = {"von Mises", "sigma_xx", "sigma_yy", "tau_xy",
                                            "max principal", "min principal"};
@@ -57,35 +57,35 @@ static const int MESH_LEVELS[4][2] = {{20, 10}, {40, 20}, {80, 40}, {120, 60}};
 static const int CLIP_PCT[4] = {100, 50, 25, 10};
 
 struct Params {
-    double W = 200.0, H = 100.0;     // sheet width and height [mm]
-    int meshLevel = 1;               // index into MESH_LEVELS
-    int nx = 40, ny = 20;            // cells along x and y
+    double W = 200.0, H = 100.0;     // sheet size [mm]
+    int meshLevel = 1;
+    int nx = 40, ny = 20;
     double thickness = 5.0;          // [mm]
     double E = 200e3, nu = 0.3;      // steel [MPa]
-    double yield = 250.0;            // yield strength used for the safety check [MPa] (mild steel)
+    double yield = 250.0;            // mild steel yield strength [MPa]
     bool planeStress = true;
     bool hole = true;
-    double holeR = 20.0;             // [mm], hole is centred in the sheet
+    double holeR = 20.0;             // hole is centred in the sheet [mm]
     int bcMode = 0;
     double Fmag = 1000.0;            // [N]
-    double angleDeg = -90.0;         // force direction, -90 = straight down
+    double angleDeg = -90.0;         // -90 = straight down
     double lx = 200.0, ly = 50.0;    // load position [mm]
-    double loadRadius = 8.0;         // load is spread over nodes within this radius [mm]
-    bool loadEdge = false;           // selftest only: spread load over the whole right edge
+    double loadRadius = 8.0;         // load is shared by nodes within this radius [mm]
+    bool loadEdge = false;           // selftest only: load the whole right edge
     int field = VON_MISES;
-    double defMult = 1.0;            // multiplier on the automatic deformation exaggeration
-    int clipIdx = 0;                 // colour bar upper limit: 100%, 50%, 25%, 10% of the range
-    bool banded = false;             // smooth or banded (contour line style) colouring
+    double defMult = 1.0;            // multiplier on the automatic deformation scale
+    int clipIdx = 0;
+    bool banded = false;
     bool showMesh = true, showUndeformed = true;
 };
 
-// ============================================================================================
-// 2. Mesh
-// ============================================================================================
+// ---------------------------------------------------------------------------
+// Mesh
+// ---------------------------------------------------------------------------
 struct Mesh {
-    std::vector<Vector2d> X;                  // node coordinates (only nodes used by some element)
-    std::vector<std::array<int, 4>> quads;    // 4 node ids per element, counter-clockwise
-    std::vector<std::array<int, 2>> bedges;   // boundary edges (outer edge + hole edge), for outlines
+    std::vector<Vector2d> X;                  // only nodes used by at least one element
+    std::vector<std::array<int, 4>> quads;    // counter-clockwise
+    std::vector<std::array<int, 2>> bedges;   // outer and hole boundary edges
 };
 
 void buildMesh(const Params& p, Mesh& m) {
@@ -99,14 +99,14 @@ void buildMesh(const Params& p, Mesh& m) {
     for (int j = 0; j < p.ny; ++j)
         for (int i = 0; i < p.nx; ++i) {
             double cx = (i + 0.5) * dx, cy = (j + 0.5) * dy;
-            if (p.hole && std::hypot(cx - p.W / 2, cy - p.H / 2) < p.holeR) continue;  // skip hole cells
+            if (p.hole && std::hypot(cx - p.W / 2, cy - p.H / 2) < p.holeR) continue;
             cells.push_back({g(i, j), g(i + 1, j), g(i + 1, j + 1), g(i, j + 1)});
         }
     for (auto& c : cells) {
         std::array<int, 4> q;
         for (int k = 0; k < 4; ++k) {
             int old = c[k];
-            if (newId[old] < 0) {  // first time this grid point is used: create the node
+            if (newId[old] < 0) {
                 newId[old] = (int)m.X.size();
                 m.X.emplace_back((old % (p.nx + 1)) * dx, (old / (p.nx + 1)) * dy);
             }
@@ -114,7 +114,7 @@ void buildMesh(const Params& p, Mesh& m) {
         }
         m.quads.push_back(q);
     }
-    // An edge that belongs to exactly one element lies on the boundary.
+    // an edge used by exactly one element is on the boundary
     std::map<std::pair<int, int>, int> count;
     for (auto& q : m.quads)
         for (int k = 0; k < 4; ++k) {
@@ -125,23 +125,23 @@ void buildMesh(const Params& p, Mesh& m) {
         if (kv.second == 1) m.bedges.push_back({kv.first.first, kv.first.second});
 }
 
-// ============================================================================================
-// 3. Q4 element: shape functions, B matrix, stiffness
-// ============================================================================================
-static const double GP = 0.5773502691896257;               // 1/sqrt(3), Gauss point
-static const double XI[4] = {-1, 1, 1, -1};                // natural coordinates of the 4 corners
+// ---------------------------------------------------------------------------
+// Q4 element
+// ---------------------------------------------------------------------------
+static const double GP = 0.5773502691896257;               // 1/sqrt(3)
+static const double XI[4] = {-1, 1, 1, -1};
 static const double ETA[4] = {-1, -1, 1, 1};
 
-// B matrix (3x8) at natural point (xi, eta) of an element with corner coordinates xy (4x2).
+// B matrix (3x8) at (xi, eta) for an element with corner coordinates xy (4x2)
 Mat38 bMatrix(const Mat42& xy, double xi, double eta, double& detJ) {
-    Mat24 dN;  // derivatives of the shape functions w.r.t. xi (row 0) and eta (row 1)
+    Mat24 dN;  // row 0: d/dxi, row 1: d/deta
     for (int k = 0; k < 4; ++k) {
         dN(0, k) = 0.25 * XI[k] * (1 + ETA[k] * eta);
         dN(1, k) = 0.25 * ETA[k] * (1 + XI[k] * xi);
     }
-    Eigen::Matrix2d J = dN * xy;           // Jacobian: natural -> physical
+    Eigen::Matrix2d J = dN * xy;
     detJ = J.determinant();
-    Mat24 dNxy = J.inverse() * dN;         // derivatives w.r.t. x and y
+    Mat24 dNxy = J.inverse() * dN;
     Mat38 B = Mat38::Zero();
     for (int k = 0; k < 4; ++k) {
         B(0, 2 * k) = dNxy(0, k);
@@ -164,23 +164,23 @@ Matrix3d constitutive(const Params& p) {
     return c * D;
 }
 
-// ============================================================================================
-// 4. FEM system: assemble, constrain, factorize, solve, recover stress
-// ============================================================================================
+// ---------------------------------------------------------------------------
+// FEM system
+// ---------------------------------------------------------------------------
 struct Fem {
     Mesh mesh;
     Matrix3d D;
     std::vector<char> fixedDof;
-    std::vector<int> freeMap;
+    std::vector<int> freeMap;                   // dof -> index in the reduced system, -1 if fixed
     int nf = 0;
     Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> ldlt;
     bool factored = false;
-    VectorXd u;                                 // displacements [u0,v0,u1,v1,...]
-    std::vector<double> sxx, syy, txy;          // smoothed nodal stress components
-    std::vector<double> field;                  // chosen scalar for colouring
+    VectorXd u;                                 // [u0, v0, u1, v1, ...]
+    std::vector<double> sxx, syy, txy;          // smoothed nodal stresses
+    std::vector<double> field;                  // scalar used for colouring
     double fmin = 0, fmax = 1, umax = 0;
-    double vmMax = 0;                           // peak von Mises over all nodes (for the safety check)
-    int peakNode = 0;                           // node with the largest |field| value
+    double vmMax = 0;                           // peak von Mises, used for the safety factor
+    int peakNode = 0;
     int loadedNodes = 0;
 };
 
@@ -196,7 +196,7 @@ bool assemble(const Params& p, Fem& F) {
         for (int k = 0; k < 4; ++k) { xy(k, 0) = m.X[q[k]].x(); xy(k, 1) = m.X[q[k]].y(); }
         Mat88 Ke = Mat88::Zero();
         for (double a : {-GP, GP})
-            for (double b : {-GP, GP}) {  // 2x2 Gauss integration, all weights = 1
+            for (double b : {-GP, GP}) {  // 2x2 Gauss rule, all weights 1
                 double detJ;
                 Mat38 B = bMatrix(xy, a, b, detJ);
                 Ke += p.thickness * detJ * B.transpose() * F.D * B;
@@ -209,7 +209,6 @@ bool assemble(const Params& p, Fem& F) {
     Eigen::SparseMatrix<double> K(nd, nd);
     K.setFromTriplets(trip.begin(), trip.end());
 
-    // Boundary conditions
     const double eps = 1e-9;
     F.fixedDof.assign(nd, 0);
     for (int n = 0; n < N; ++n) {
@@ -275,7 +274,7 @@ void solveLoad(const Params& p, Fem& F) {
     for (int n = 0; n < N; ++n) F.umax = std::max(F.umax, std::hypot(F.u(2 * n), F.u(2 * n + 1)));
 }
 
-// Evaluate stress at each element corner, then average over all elements touching the node.
+// Stress at every element corner, averaged over the elements sharing each node
 void recoverStress(const Params& p, Fem& F) {
     (void)p;
     const Mesh& m = F.mesh;
@@ -332,9 +331,9 @@ void updateField(const Params& p, Fem& F) {
     if (F.fmax - F.fmin < 1e-12) F.fmax = F.fmin + 1e-12;
 }
 
-// ============================================================================================
-// 5. Self test: slender cantilever vs Euler-Bernoulli
-// ============================================================================================
+// ---------------------------------------------------------------------------
+// Self test: slender cantilever vs Euler-Bernoulli beam theory
+// ---------------------------------------------------------------------------
 int selftest() {
     Params p;
     p.W = 100; p.H = 10; p.nx = 100; p.ny = 8;
@@ -354,10 +353,10 @@ int selftest() {
     return 0;
 }
 
-// ============================================================================================
-// 6. Rendering helpers: colour map, vector lettering, rules, tags
-// ============================================================================================
-static void colormap(double t, float& r, float& g, float& b) {  // classic "jet"
+// ---------------------------------------------------------------------------
+// Rendering helpers
+// ---------------------------------------------------------------------------
+static void colormap(double t, float& r, float& g, float& b) {  // "jet"
     auto cl = [](double v) { return (float)std::max(0.0, std::min(1.0, v)); };
     r = cl(1.5 - std::fabs(4 * t - 3));
     g = cl(1.5 - std::fabs(4 * t - 2));
@@ -373,7 +372,9 @@ static void makeTexture(bool banded) {
         if (banded) t = (std::floor(t * BANDS) + 0.5) / BANDS;
         float r, g, b;
         colormap(t, r, g, b);
-        img[3 * i] = (unsigned char)(255 * r); img[3 * i + 1] = (unsigned char)(255 * g); img[3 * i + 2] = (unsigned char)(255 * b);
+        img[3 * i] = (unsigned char)(255 * r);
+        img[3 * i + 1] = (unsigned char)(255 * g);
+        img[3 * i + 2] = (unsigned char)(255 * b);
     }
     if (!gTex) glGenTextures(1, &gTex);
     glBindTexture(GL_TEXTURE_1D, gTex);
@@ -385,11 +386,11 @@ static void makeTexture(bool banded) {
 }
 
 struct Col { float r, g, b, a; };
-static const Col C_BG = {0.975f, 0.978f, 0.982f, 1.0f};     // page
-static const Col C_INK = {0.09f, 0.11f, 0.15f, 1.0f};       // main text and outlines
-static const Col C_GRAY = {0.28f, 0.31f, 0.37f, 1.0f};      // secondary text (darker = easier to read)
-static const Col C_RULE = {0.78f, 0.80f, 0.84f, 1.0f};      // hairlines
-static const Col C_NAVY = {0.08f, 0.20f, 0.40f, 1.0f};      // headings, rules, load arrow
+static const Col C_BG = {0.975f, 0.978f, 0.982f, 1.0f};
+static const Col C_INK = {0.09f, 0.11f, 0.15f, 1.0f};
+static const Col C_GRAY = {0.28f, 0.31f, 0.37f, 1.0f};
+static const Col C_RULE = {0.78f, 0.80f, 0.84f, 1.0f};
+static const Col C_NAVY = {0.08f, 0.20f, 0.40f, 1.0f};
 static const Col C_GREEN = {0.08f, 0.48f, 0.24f, 1.0f};
 static const Col C_AMBER = {0.72f, 0.45f, 0.00f, 1.0f};
 static const Col C_RED = {0.75f, 0.12f, 0.12f, 1.0f};
@@ -417,9 +418,9 @@ static void vline(double x, double y0, double y1, const Col& c, float lw = 1.0f)
     glBegin(GL_LINES); glVertex2d(x, y0); glVertex2d(x, y1); glEnd();
 }
 
-// Single-stroke "technical drawing" lettering. Each glyph lives on a grid 0..4 wide and 0..6 tall.
-// d = polylines of x,y digit pairs; a space separates points and '|' starts a new polyline.
-// Lower case letters are drawn as small capitals, which is how CAD lettering usually handles them.
+// Built-in single-stroke lettering, so no font library is needed.
+// Each glyph sits on a grid 0..4 wide and 0..6 tall. 'd' holds x,y digit pairs for a polyline,
+// separated by spaces; '|' starts a new polyline. Lower case is drawn as small capitals.
 struct Glyph { char c; int w; const char* d; };
 static const Glyph GLYPHS[] = {
     {' ', 2, ""},
@@ -458,17 +459,17 @@ static double advanceOf(char c, double u) {
     double k = (c >= 'a' && c <= 'z') ? 0.8 : 1.0;
     return g ? (g->w + 2) * u * k : 4 * u;
 }
-// Width of a string whose capital letters are h pixels tall.
+// width of a string whose capitals are h pixels tall
 static double textW(const char* s, double h) {
     double u = h / 6.0, w = 0;
     for (const char* p = s; *p; ++p) w += advanceOf(*p, u);
     return std::max(0.0, w - 2 * u);
 }
 
-// Global text boldness: 1.0 = normal, 1.3 = bold, 1.6 = extra bold. Scales every stroke width.
+// scales every stroke width: 1.0 normal, 1.3 bold, 1.6 extra bold
 static const float TEXT_WEIGHT = 1.35f;
 
-// Draw text with its baseline-left corner at (x, y); h = cap height in pixels; lw = stroke width (0 = auto).
+// (x, y) is the baseline-left corner, h the cap height in pixels, lw the stroke width (0 = auto)
 static void text(const char* s, double x, double y, double h, const Col& col, float lw = 0) {
     const double u = h / 6.0;
     if (lw <= 0) lw = (float)std::max(1.2, h * 0.11);
@@ -489,7 +490,7 @@ static void text(const char* s, double x, double y, double h, const Col& col, fl
                     glBegin(GL_LINE_STRIP);
                     for (int i = 0; i < n; ++i) glVertex2d(px[i], py[i]);
                     glEnd();
-                    if (lw >= 1.5f) {   // round off the joints of thick strokes
+                    if (lw >= 1.5f) {   // round the joints on thick strokes
                         glBegin(GL_POINTS);
                         for (int i = 0; i < n; ++i) glVertex2d(px[i], py[i]);
                         glEnd();
@@ -512,7 +513,7 @@ static void text(const char* s, double x, double y, double h, const Col& col, fl
 static void textRight(const char* s, double xr, double y, double h, const Col& c, float lw = 0) { text(s, xr - textW(s, h), y, h, c, lw); }
 static void textCenter(const char* s, double xc, double y, double h, const Col& c, float lw = 0) { text(s, xc - textW(s, h) / 2, y, h, c, lw); }
 
-// Text on a small light label so it stays readable on top of the contour plot.
+// text on a small light label so it stays readable over the contour plot
 static void tag(const char* s, double x, double y, double h, const Col& fg, const Col& bg) {
     double w = textW(s, h);
     fillRect(x - 5, y - 5, w + 10, h + 10, bg);
@@ -520,7 +521,6 @@ static void tag(const char* s, double x, double y, double h, const Col& fg, cons
     text(s, x, y, h, fg);
 }
 
-// Nice number formatting for tick labels.
 static void fmtVal(double v, char* buf, size_t n) {
     double a = std::fabs(v);
     if (a < 1000) std::snprintf(buf, n, "%.1f", v);
@@ -528,9 +528,9 @@ static void fmtVal(double v, char* buf, size_t n) {
     else std::snprintf(buf, n, "%.2g", v);
 }
 
-// ============================================================================================
-// 7. Application state, view transform, drawing
-// ============================================================================================
+// ---------------------------------------------------------------------------
+// Application state and drawing
+// ---------------------------------------------------------------------------
 struct App {
     Params p;
     Fem F;
@@ -544,7 +544,7 @@ struct App {
 
 struct View { double s, ox, oy; };
 static View viewFor(int ww, int wh) {
-    const double left = 90, right = 170, top = 105, bottom = 195;   // space reserved for header, colour bar and table
+    const double left = 90, right = 170, top = 105, bottom = 195;   // room for header, colour bar, table
     double availW = ww - left - right, availH = wh - top - bottom;
     View v;
     v.s = std::max(0.5, std::min(availW / app.p.W, availH / (app.p.H * 1.4)));
@@ -591,7 +591,7 @@ static void drawColorbar(int ww, int wh, const Params& p, const Fem& F, double t
         std::snprintf(buf, sizeof buf, "CLIPPED TO %d%%", CLIP_PCT[p.clipIdx]);
         text(buf, bx - 12, by0 - 22, 8, C_AMBER);
     }
-    if (p.field == VON_MISES && p.yield > F.fmin && p.yield < top) {   // yield level
+    if (p.field == VON_MISES && p.yield > F.fmin && p.yield < top) {   // yield level marker
         double y = by0 + (p.yield - F.fmin) / (top - F.fmin) * (by1 - by0);
         hline(bx - 6, bx + bw + 6, y, C_INK, 2.0f);
         char buf[32];
@@ -600,7 +600,7 @@ static void drawColorbar(int ww, int wh, const Params& p, const Fem& F, double t
     }
 }
 
-// Three-column data table under the plot: model, loading and supports, results.
+// Three-column table under the plot: model, loading and supports, results
 static void drawTable(int ww, const Params& p, const Fem& F) {
     const double x0 = 40, x1 = ww - 40, yb = 42, yt = 176, W = x1 - x0;
     hline(x0, x1, yt, C_NAVY, 1.5f);
@@ -620,31 +620,40 @@ static void drawTable(int ww, const Params& p, const Fem& F) {
     };
     char b[96], c[64];
 
-    // model
-    std::snprintf(b, sizeof b, "%.0f x %.0f x %.1f mm", p.W, p.H, p.thickness); row(0, 0, "Sheet", b);
-    std::snprintf(b, sizeof b, "Steel   E = %.0f GPa   nu = %.2f", p.E / 1000.0, p.nu); row(0, 1, "Material", b);
-    if (p.hole) std::snprintf(c, sizeof c, "hole R = %.0f mm", p.holeR); else std::snprintf(c, sizeof c, "no hole");
-    std::snprintf(b, sizeof b, "%s, %s", p.planeStress ? "Plane stress" : "Plane strain", c); row(0, 2, "Mode", b);
-    std::snprintf(b, sizeof b, "%d x %d   (%zu nodes)", p.nx, p.ny, F.mesh.X.size()); row(0, 3, "Mesh", b);
+    std::snprintf(b, sizeof b, "%.0f x %.0f x %.1f mm", p.W, p.H, p.thickness);
+    row(0, 0, "Sheet", b);
+    std::snprintf(b, sizeof b, "Steel   E = %.0f GPa   nu = %.2f", p.E / 1000.0, p.nu);
+    row(0, 1, "Material", b);
+    if (p.hole) std::snprintf(c, sizeof c, "hole R = %.0f mm", p.holeR);
+    else std::snprintf(c, sizeof c, "no hole");
+    std::snprintf(b, sizeof b, "%s, %s", p.planeStress ? "Plane stress" : "Plane strain", c);
+    row(0, 2, "Mode", b);
+    std::snprintf(b, sizeof b, "%d x %d   (%zu nodes)", p.nx, p.ny, F.mesh.X.size());
+    row(0, 3, "Mesh", b);
 
-    // loading
-    std::snprintf(b, sizeof b, "%.0f N at %.0f deg", p.Fmag, p.angleDeg); row(1, 0, "Load", b);
-    std::snprintf(b, sizeof b, "(%.0f, %.0f) mm", p.lx, p.ly); row(1, 1, "Position", b);
-    std::snprintf(b, sizeof b, "radius %.0f mm", p.loadRadius); row(1, 2, "Patch", b);
+    std::snprintf(b, sizeof b, "%.0f N at %.0f deg", p.Fmag, p.angleDeg);
+    row(1, 0, "Load", b);
+    std::snprintf(b, sizeof b, "(%.0f, %.0f) mm", p.lx, p.ly);
+    row(1, 1, "Position", b);
+    std::snprintf(b, sizeof b, "radius %.0f mm", p.loadRadius);
+    row(1, 2, "Patch", b);
     row(1, 3, "Supports", BC_NAMES[p.bcMode]);
 
-    // results
-    if (F.vmMax < 1e4) std::snprintf(b, sizeof b, "%.1f MPa", F.vmMax); else std::snprintf(b, sizeof b, "%.3g MPa", F.vmMax);
+    if (F.vmMax < 1e4) std::snprintf(b, sizeof b, "%.1f MPa", F.vmMax);
+    else std::snprintf(b, sizeof b, "%.3g MPa", F.vmMax);
     row(2, 0, "Peak von Mises", b);
-    std::snprintf(b, sizeof b, "%.0f MPa", p.yield); row(2, 1, "Yield strength", b);
+    std::snprintf(b, sizeof b, "%.0f MPa", p.yield);
+    row(2, 1, "Yield strength", b);
     double sf = F.vmMax > 1e-9 ? p.yield / F.vmMax : 999.0;
     Col sc = sf >= 1.5 ? C_GREEN : sf >= 1.0 ? C_AMBER : C_RED;
     const char* verdict = sf >= 1.5 ? "SAFE" : sf >= 1.0 ? "MARGINAL" : "YIELDS";
-    if (sf > 99) std::snprintf(b, sizeof b, ">99"); else std::snprintf(b, sizeof b, "%.2f", sf);
+    if (sf > 99) std::snprintf(b, sizeof b, ">99");
+    else std::snprintf(b, sizeof b, "%.2f", sf);
     row(2, 2, "Safety factor", b, sc);
     text(verdict, cx[2] + 20 + offs[2] + textW(b, 10) + 16, yt - 56 - 2 * 23, 9, sc, 1.5f);
     double defScale = F.umax > 0 ? 0.08 * p.H / F.umax * p.defMult : 0.0;
-    if (F.umax >= 1e-3) std::snprintf(c, sizeof c, "%.4f mm", F.umax); else std::snprintf(c, sizeof c, "%.2e mm", F.umax);
+    if (F.umax >= 1e-3) std::snprintf(c, sizeof c, "%.4f mm", F.umax);
+    else std::snprintf(c, sizeof c, "%.2e mm", F.umax);
     std::snprintf(b, sizeof b, "%s  (drawn x%.0f)", c, defScale);
     row(2, 3, "Max displacement", b);
 
@@ -702,7 +711,7 @@ static void drawScene(GLFWwindow* win) {
 
     double autoScale = F.umax > 0 ? 0.08 * p.H / F.umax : 0.0;
     double def = autoScale * p.defMult;
-    std::vector<Vector2d> P(N), P0(N);
+    std::vector<Vector2d> P(N), P0(N);   // deformed and undeformed screen positions
     for (int n = 0; n < N; ++n) {
         Vector2d x0 = F.mesh.X[n];
         Vector2d x1 = x0 + def * Vector2d(F.u(2 * n), F.u(2 * n + 1));
@@ -711,7 +720,7 @@ static void drawScene(GLFWwindow* win) {
     }
     const double sx0 = v.ox, sx1 = v.ox + v.s * p.W, sy0 = v.oy, sy1 = v.oy + v.s * p.H;
 
-    // ---- dimension lines (undeformed geometry) ------------------------------------------------
+    // dimension lines
     {
         char b[32];
         double yd = sy1 + 26, xd = sx0 - 54;
@@ -732,7 +741,7 @@ static void drawScene(GLFWwindow* win) {
         textCenter(b, xd, (sy0 + sy1) / 2 - 4.5, 9, C_GRAY);
     }
 
-    // ---- contour map: scalar -> 1D texture coordinate ----------------------------------------
+    // contour map: each node's value becomes a 1D texture coordinate
     double top = clipTop(p, F);
     auto tc = [&](int n) {
         double t = (F.field[n] - F.fmin) / (top - F.fmin);
@@ -758,7 +767,7 @@ static void drawScene(GLFWwindow* win) {
             glEnd();
         }
     }
-    if (p.showUndeformed) {   // dashed outline of the original shape
+    if (p.showUndeformed) {
         glEnable(GL_LINE_STIPPLE); glLineStipple(3, 0x5555);
         setCol(C_GRAY); glLineWidth(1.0f);
         glBegin(GL_LINES);
@@ -766,12 +775,12 @@ static void drawScene(GLFWwindow* win) {
         glEnd();
         glDisable(GL_LINE_STIPPLE);
     }
-    setCol(C_INK); glLineWidth(1.6f);   // outline of the deformed sheet
+    setCol(C_INK); glLineWidth(1.6f);
     glBegin(GL_LINES);
     for (auto& e : F.mesh.bedges) { glVertex2d(P[e[0]].x(), P[e[0]].y()); glVertex2d(P[e[1]].x(), P[e[1]].y()); }
     glEnd();
 
-    // ---- supports: hatching ------------------------------------------------------------------
+    // support hatching
     setCol(C_GRAY); glLineWidth(1.2f);
     glBegin(GL_LINES);
     for (int n = 0; n < N; ++n)
@@ -786,7 +795,7 @@ static void drawScene(GLFWwindow* win) {
         }
     glEnd();
 
-    // ---- hole label --------------------------------------------------------------------------
+    // hole radius label
     if (p.hole && v.s * p.holeR > 28) {
         Vector2d acc(0, 0); int cnt = 0;
         double rr = p.holeR + 1.5 * std::max(p.W / p.nx, p.H / p.ny);
@@ -800,7 +809,7 @@ static void drawScene(GLFWwindow* win) {
         }
     }
 
-    // ---- load: patch circle, arrow and label -------------------------------------------------
+    // load patch, arrow and label
     if (!p.loadEdge) {
         double cx = v.ox + v.s * p.lx, cy = v.oy + v.s * p.ly;
         double a = p.angleDeg * M_PI / 180.0, dxn = std::cos(a), dyn = std::sin(a);
@@ -813,7 +822,7 @@ static void drawScene(GLFWwindow* win) {
         double tx = cx - dxn * len, ty = cy - dyn * len;
         glLineWidth(2.2f);
         glBegin(GL_LINES); glVertex2d(tx, ty); glVertex2d(cx - dxn * 10, cy - dyn * 10); glEnd();
-        glBegin(GL_TRIANGLES);   // arrow head
+        glBegin(GL_TRIANGLES);
         glVertex2d(cx, cy);
         glVertex2d(cx - dxn * 18 + dyn * 6, cy - dyn * 18 - dxn * 6);
         glVertex2d(cx - dxn * 18 - dyn * 6, cy - dyn * 18 + dxn * 6);
@@ -828,7 +837,7 @@ static void drawScene(GLFWwindow* win) {
         tag(b, lxp, lyp, 10, C_NAVY, Col{1, 1, 1, 0.9f});
     }
 
-    // ---- peak stress marker ------------------------------------------------------------------
+    // peak stress marker
     {
         Vector2d pk = P[F.peakNode];
         setCol(C_INK); glLineWidth(1.6f);
@@ -872,9 +881,9 @@ static void saveShot(GLFWwindow* win, const char* path) {
     std::printf("saved %s\n", path);
 }
 
-// ============================================================================================
-// 8. Input
-// ============================================================================================
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
 static void moveLoadTo(double mx, double my) {
     View v = viewFor(app.ww, app.wh);
     double x = (mx - v.ox) / v.s, y = (app.wh - my - v.oy) / v.s;
@@ -936,6 +945,7 @@ static void onKey(GLFWwindow* w, int key, int, int action, int) {
     app.dirtyTitle = true;
 }
 
+// Redo only the stages that the last input invalidated
 static void refresh() {
     Params& p = app.p;
     if (app.dirtyMesh) { buildMesh(p, app.F.mesh); app.dirtyMesh = false; }
